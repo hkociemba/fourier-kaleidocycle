@@ -1,0 +1,165 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fourier-Kaleidozyklus · 3D-Animation</title>
+<style>
+body{font:15px system-ui,Arial,sans-serif;background:#f5f6fa;color:#172337;margin:0}main{max-width:1150px;margin:16px auto;padding:0 16px}h2{margin:0 0 14px}
+#panel{background:white;border:1px solid #ddd;border-radius:10px;padding:12px;display:flex;flex-wrap:wrap;align-items:center;gap:16px}label{display:flex;gap:7px;align-items:center}input[type=range]{width:130px}button{cursor:pointer;padding:7px 11px}
+#view{width:100%;height:610px;border:1px solid #ddd;border-radius:10px;margin-top:12px;background:linear-gradient(160deg,#fff,#f2f4f9);touch-action:none;display:block;box-sizing:border-box}
+.note{font-size:13px;color:#455;line-height:1.5}#status{font-variant-numeric:tabular-nums}#mode{margin-left:auto}
+@media(max-width:650px){#view{height:450px}input[type=range]{width:100px}}
+</style></head><body><main>
+<h2>Fourier-Kaleidozyklus · 3D-Animation</h2><div id="panel">
+<label>N <input id="N" type="range" min="7" max="100" step="1" value="11"><b id="nOut">11</b></label>
+<label>Scharnierlänge <input id="L" type="range" min="0.2" max="3" step="0.1" value="1.5"><b id="lOut">1.50</b></label>
+<label>Phase t <input id="t" type="range" min="0" max="6.283185307179586" step="0.005" value="1.58"><b id="tOut">1.58</b></label>
+<button id="play">▶ Animation</button><label><input type="checkbox" id="faces" checked>Tetraederflächen</label><label title="Entfernt die globale Drehung durch Best-Fit-Ausrichtung an der Ausgangsfigur"><input type="checkbox" id="stabilize" checked>Ausrichtung stabilisieren</label>
+<button id="resetView">Ansicht zurücksetzen</button></div>
+<canvas id="view"></canvas>
+<p id="status" class="note">3D-Darstellung wird aufgebaut …</p>
+<p class="note">Mit Maus oder Finger ziehen: Ansicht drehen · Mausrad: zoomen. Die Ausrichtungsstabilisierung entfernt die überflüssige Gesamtdrehung. Scharnierlänge: Bereich wächst automatisch mit N. Alles läuft offline, ohne zusätzliche Bibliotheken.</p>
+<script>
+'use strict';
+const rhoInf=1.7259870589298643, AInf=8.093495685597214;
+const cr=[-.3021307469697978,.24987280534026363,-.058987068750799905,.0034896153019249444,-.92921633805190818,.26812648362176839,-.024774568230648594,.00038226694313651726];
+const ca=[.58293397624929466,-.53071884616378606,.14832788333353955,-.012530576311971568,-1.1486834741748089,.44606393879822259,-.066214548071536483,.0029590292722746474];
+function pade(c,x){let p=x*(c[0]+x*(c[1]+x*(c[2]+x*c[3]))),d=1+x*(c[4]+x*(c[5]+x*(c[6]+x*c[7])));return p/d;}
+function parameters(n){const x=(7/n)**2;return [rhoInf+pade(cr,x),(AInf+pade(ca,x))/n];}
+function mul(a,b){let z=new Array(9);for(let i=0;i<3;i++)for(let j=0;j<3;j++)z[3*i+j]=a[3*i]*b[j]+a[3*i+1]*b[j+3]+a[3*i+2]*b[j+6];return z;}
+function mv(q,v){return [q[0]*v[0]+q[1]*v[1]+q[2]*v[2],q[3]*v[0]+q[4]*v[1]+q[5]*v[2],q[6]*v[0]+q[7]*v[1]+q[8]*v[2]];}
+function plus(a,b){return a.map((x,i)=>x+b[i]);}
+function rX(a){let c=Math.cos(a),s=Math.sin(a);return [1,0,0,0,c,-s,0,s,c];}
+function rZ(a){let c=Math.cos(a),s=Math.sin(a);return [c,-s,0,s,c,0,0,0,1];}
+function geometry(n,L,t){let [rho,alpha]=parameters(n),delta=3*Math.PI/n,co=[];
+  for(let k=1;k<=39;k+=2)co.push([k,4*Math.sin(k*delta)/(k*Math.cosh(k*rho))]);
+  let P=[[0,0,0]],Z=[],q=[1,0,0,0,1,0,0,0,1],base=rX(alpha);
+  for(let j=0;j<=n;j++){
+    Z.push(mv(q,[0,0,1]));if(j===n)break;
+    let theta=0;for(const [k,b] of co)theta+=b*Math.cos(k*(t+j*delta));
+    P.push(plus(P[j],mv(q,[1,0,0])));q=mul(mul(q,base),rZ(theta));
+  }
+  let centroid=[0,0,0];for(let j=0;j<n;j++)centroid=plus(centroid,P[j]);centroid=centroid.map(v=>v/n);
+  let top=[],bottom=[];for(let j=0;j<=n;j++){
+    let c=P[j].map((v,i)=>v-centroid[i]);top.push(c.map((v,i)=>v+L*Z[j][i]/2));bottom.push(c.map((v,i)=>v-L*Z[j][i]/2));
+  }
+  let posErr=Math.max(...P[n].map(Math.abs));let frameErr=Math.max(...q.map((v,i)=>Math.abs(v-[1,0,0,0,-1,0,0,0,-1][i])));
+  return {P:P.map(a=>a.map((v,i)=>v-centroid[i])),top,bottom,rho,alpha,posErr,frameErr};
+}
+
+// Best-fit rigid rotation (Horn quaternion method) against a fixed t=0 reference.
+// Removes only the global motion. Relative hinge angles and shape remain unchanged.
+function stableRotate(d,reference){
+  const n=d.P.length-1;
+  const src=d.P.slice(0,n).concat(d.top.slice(0,n),d.bottom.slice(0,n));
+  const dst=reference.P.slice(0,n).concat(reference.top.slice(0,n),reference.bottom.slice(0,n));
+  const h=Array.from({length:3},()=>[0,0,0]);
+  for(let k=0;k<src.length;k++)for(let i=0;i<3;i++)for(let j=0;j<3;j++)h[i][j]+=src[k][i]*dst[k][j];
+  const a=h,trace=a[0][0]+a[1][1]+a[2][2];
+  // Davenport symmetric quaternion matrix, left-to-right point alignment.
+  const K=[
+    [trace,a[1][2]-a[2][1],a[2][0]-a[0][2],a[0][1]-a[1][0]],
+    [a[1][2]-a[2][1],a[0][0]-a[1][1]-a[2][2],a[0][1]+a[1][0],a[0][2]+a[2][0]],
+    [a[2][0]-a[0][2],a[0][1]+a[1][0],-a[0][0]+a[1][1]-a[2][2],a[1][2]+a[2][1]],
+    [a[0][1]-a[1][0],a[0][2]+a[2][0],a[1][2]+a[2][1],-a[0][0]-a[1][1]+a[2][2]]
+  ];
+  // Jacobi diagonalization of real symmetric 4x4 matrix: dominant eigenvector.
+  const m=K.map(r=>r.slice()),v=Array.from({length:4},(_,i)=>Array.from({length:4},(_,j)=>+(i===j)));
+  for(let iter=0;iter<90;iter++){
+    let p=0,q=1,max=0;
+    for(let i=0;i<4;i++)for(let j=i+1;j<4;j++){
+      const z=Math.abs(m[i][j]);if(z>max){max=z;p=i;q=j;}
+    }
+    if(max<1e-12)break;
+    const tau=(m[q][q]-m[p][p])/(2*m[p][q]);
+    const tt=(tau>=0?1:-1)/(Math.abs(tau)+Math.sqrt(1+tau*tau));
+    const cc=1/Math.sqrt(1+tt*tt),ss=tt*cc;
+    const mp=m[p][p],mq=m[q][q],off=m[p][q];
+    m[p][p]=mp-tt*off;m[q][q]=mq+tt*off;m[p][q]=m[q][p]=0;
+    for(let r=0;r<4;r++)if(r!==p&&r!==q){
+      let rp=m[r][p],rq=m[r][q];
+      m[r][p]=m[p][r]=cc*rp-ss*rq;
+      m[r][q]=m[q][r]=ss*rp+cc*rq;
+    }
+    for(let r=0;r<4;r++){
+      let rp=v[r][p],rq=v[r][q];v[r][p]=cc*rp-ss*rq;v[r][q]=ss*rp+cc*rq;
+    }
+  }
+  const best=[0,1,2,3].reduce((bi,i)=>m[i][i]>m[bi][bi]?i:bi,0);
+  let [w,x,y,z]=v.map(row=>row[best]);
+  const norm=Math.hypot(w,x,y,z);w/=norm;x/=norm;y/=norm;z/=norm;
+  const R=[1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w),
+           2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w),
+           2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)];
+  for(const key of ['P','top','bottom'])d[key]=d[key].map(point=>mv(R,point));
+  return d;
+}
+let referenceKey='',referenceShape=null;
+const els={n:document.getElementById('N'),L:document.getElementById('L'),t:document.getElementById('t'),faces:document.getElementById('faces'),stabilize:document.getElementById('stabilize'),play:document.getElementById('play'),status:document.getElementById('status')};
+const canvas=document.getElementById('view'),ctx=canvas.getContext('2d');
+let azimuth=-.73,elevation=.37,zoom=1,drag=false,dragX=0,dragY=0,playing=false,lastFrame=null,raf=0;
+function project(v,w,h,scale){let ca=Math.cos(azimuth),sa=Math.sin(azimuth),ce=Math.cos(elevation),se=Math.sin(elevation);
+ let xx=ca*v[0]-sa*v[1],yy=sa*v[0]+ca*v[1],zz=v[2];
+ return [w/2+scale*xx,h/2-scale*(ce*zz-se*yy),ce*yy+se*zz];}
+function draw(){
+ const n=+els.n.value,L=+els.L.value,t=+els.t.value;
+ document.getElementById('nOut').textContent=n;document.getElementById('lOut').textContent=L.toFixed(2);document.getElementById('tOut').textContent=t.toFixed(2);
+ const d=geometry(n,L,t);
+ if(els.stabilize.checked){
+   const key=n+':'+L;
+   if(key!==referenceKey){referenceShape=geometry(n,L,0);referenceKey=key;}
+   stableRotate(d,referenceShape);
+ }
+ const r=canvas.getBoundingClientRect(),pixelRatio=Math.min(window.devicePixelRatio||1,2),w=Math.max(1,r.width),h=Math.max(1,r.height);
+ canvas.width=Math.round(w*pixelRatio);canvas.height=Math.round(h*pixelRatio);ctx.setTransform(pixelRatio,0,0,pixelRatio,0,0);
+ ctx.clearRect(0,0,w,h);
+ const coords=[...d.P,...d.top,...d.bottom];let maxR=Math.max(2,...coords.map(v=>Math.hypot(...v)));
+ const scale=Math.min(w,h)*.43*zoom/maxR;
+ const pp=coords.map(v=>project(v,w,h,scale));
+ const P=pp.slice(0,n+1),top=pp.slice(n+1,2*n+2),bot=pp.slice(2*n+2);
+ if(els.faces.checked){
+  const tris=[];
+  for(let j=0;j<n;j++){
+   let v=[top[j],bot[j],top[j+1],bot[j+1]];
+   for(let ind of [[0,1,2],[0,1,3],[0,2,3],[1,2,3]]){
+    let points=ind.map(i=>v[i]);
+    tris.push({pts:points,z:points.reduce((a,p)=>a+p[2],0)/3,j});
+   }
+  }
+  tris.sort((a,b)=>a.z-b.z);
+  for(let tri of tris){
+   let hue=(tri.j*360/n+30)%360;
+   ctx.beginPath();tri.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
+   ctx.fillStyle=`hsla(${hue},66%,57%,0.13)`;ctx.fill();
+   ctx.strokeStyle=`hsla(${hue},60%,37%,0.29)`;ctx.lineWidth=.8;ctx.stroke();
+  }
+ }
+ for(let j=0;j<n;j++){
+  ctx.beginPath();ctx.moveTo(P[j][0],P[j][1]);ctx.lineTo(P[j+1][0],P[j+1][1]);
+  ctx.strokeStyle='#8b94a2';ctx.lineWidth=1.5;ctx.stroke();
+ }
+ const hinges=[];for(let j=0;j<n;j++)hinges.push({j,z:(top[j][2]+bot[j][2])/2});hinges.sort((a,b)=>a.z-b.z);
+ for(let {j} of hinges){
+  ctx.beginPath();ctx.moveTo(top[j][0],top[j][1]);ctx.lineTo(bot[j][0],bot[j][1]);
+  ctx.strokeStyle=j%2?'#2388cc':'#d9485c';ctx.lineWidth=Math.max(2.6,6-Math.log2(Math.max(1,n/15))*.8);ctx.lineCap='round';ctx.stroke();
+ }
+ ctx.fillStyle='#26374e';for(let j=0;j<n;j++){ctx.beginPath();ctx.arc(P[j][0],P[j][1],1.9,0,2*Math.PI);ctx.fill();}
+ els.status.textContent=`N=${n} · ρ≈${d.rho.toFixed(12)} · α≈${(d.alpha*180/Math.PI).toFixed(9)}° · Orientierungsfehler=${d.frameErr.toExponential(2)} · Positionsfehler=${d.posErr.toExponential(2)}`;
+
+}
+// At N=100 the hinge slider reaches 25, at N=11 it reaches 3.
+function updateLengthRange(){
+  els.L.max = Math.max(3, Math.ceil(+els.n.value/2)/2);
+}
+function refresh(){
+  updateLengthRange();
+  try {draw()} catch(e) {els.status.textContent='Zeichenfehler: '+e.message;console.error(e)}
+}
+for(let e of [els.n,els.L,els.t,els.faces,els.stabilize])e.addEventListener('input',refresh);
+canvas.addEventListener('pointerdown',e=>{drag=true;dragX=e.clientX;dragY=e.clientY;canvas.setPointerCapture(e.pointerId)});
+canvas.addEventListener('pointermove',e=>{if(!drag)return;azimuth+=(e.clientX-dragX)*.009;elevation=Math.max(-1.52,Math.min(1.52,elevation+(e.clientY-dragY)*.008));dragX=e.clientX;dragY=e.clientY;refresh()});
+canvas.addEventListener('pointerup',()=>drag=false);canvas.addEventListener('pointercancel',()=>drag=false);
+canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.3,Math.min(5,zoom*Math.exp(-e.deltaY*.001)));refresh()},{passive:false});
+document.getElementById('resetView').addEventListener('click',()=>{azimuth=-.73;elevation=.37;zoom=1;refresh()});
+els.play.addEventListener('click',()=>{playing=!playing;els.play.textContent=playing?'⏸ Pause':'▶ Animation';if(playing){lastFrame=null;raf=requestAnimationFrame(tick)}else cancelAnimationFrame(raf)});
+function tick(ms){if(!playing)return;if(lastFrame!==null){els.t.value=((+els.t.value+(ms-lastFrame)*.00036)%(2*Math.PI));refresh()}lastFrame=ms;raf=requestAnimationFrame(tick)}
+window.addEventListener('resize',refresh);
+refresh();
+</script></main></body></html>
